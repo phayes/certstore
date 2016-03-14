@@ -142,7 +142,7 @@ func (cert *Certificate) Verify() error {
 		if priv.N.Cmp(pub.N) != 0 {
 			return ErrInvalidPrivateKey
 		}
-		if Priv.N.BitLen() < OptMinimumRSABits {
+		if priv.N.BitLen() < OptMinimumRSABits {
 			return ErrKeyTooSmall
 		}
 	case *ecdsa.PrivateKey:
