@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestJSONRoundTrip(t *testing.T) {
+func TestCertificateJSONRoundTrip(t *testing.T) {
 	file, err := ioutil.ReadFile("./testdata/example.json")
 	if err != nil {
 		t.Error(err)

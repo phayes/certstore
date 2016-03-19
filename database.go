@@ -26,7 +26,6 @@ var (
 
 	// Other miscellaneous queries
 	QueryFetchUserCerts   *sqlx.Stmt // Select()
-	QueryFetchUserCertIds *sqlx.Stmt // Select()
 	QueryCertUpdateActive *sqlx.Stmt // Exec()
 	QueryCertDeleteUsers  *sqlx.Stmt // Exec()
 
@@ -44,7 +43,6 @@ var (
 
 	// SQL for miscallaneous queries
 	SQLFetchUserCerts   = "SELECT * from certificate WHERE user = $1 AND (active = $2 OR active = $3)"
-	SQLFetchUserCertIds = "SELECT id from certificate WHERE user = $1"
 	SQLCertUpdateActive = "UPDATE certificate SET active = $1 WHERE user = $2 AND id = $3;"
 	SQLCertDeleteUsers  = "DELETE from certificate WHERE user = $1"
 )
@@ -77,7 +75,7 @@ func DatabaseShutdown() {
 
 // Prepare the database queries in the database upon startup
 // By exclusively using prepared queries, we can gain some
-// speedups on the database.
+// speedups in the database.
 func DatabasePrepareQueries() error {
 	var err error
 
@@ -122,10 +120,6 @@ func DatabasePrepareQueries() error {
 	if err != nil {
 		return err
 	}
-	QueryFetchUserCertIds, err = db.Preparex(SQLFetchUserCerts)
-	if err != nil {
-		return err
-	}
 	QueryDeleteCert, err = db.Preparex(SQLDeleteCert)
 	if err != nil {
 		return err
@@ -138,13 +132,11 @@ func DatabasePrepareQueries() error {
 	return nil
 }
 
-// Given a UserExtended, insert a row into the database
+// Given a User, insert a row into the database
 // If the user struct contains certificates, insert
 // the certificates in a transaction safe manner.
-func DatabaseCreateUser(user *UserExtended) error {
-	// Use a transaction as there might be multiple
-	// queries if we are also creating certificates.
-	// We want to avoid a situation where a client could
+func DatabaseCreateUser(user *User) error {
+	// Use a transaction as to avoid a situation where a client could
 	// read a new user with only a partial list of certificates
 	tx, err := db.Beginx()
 	if err != nil {
@@ -212,41 +204,8 @@ func DatabaseReadUser(userid string) (*User, error) {
 		}
 	}
 
-	// Attach the cert IDs
-	err = QueryFetchUserCertIds.Select(&user.Certs, userid)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	return user, nil
-}
-
-// Given a userID, get a UserExtended with the full certificate list
-func DatabaseReadUserExtended(userid, showcerts string) (*UserExtended, error) {
-	// Build the User struct
-	user := new(UserExtended)
-	err := QueryReadUser.Get(user, userid)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		} else {
-			return nil, err
-		}
-	}
-
-	// Attach the Certificates
-	var ac1, ac2 bool
-	if showcerts == ShowCertsActive {
-		ac1, ac2 = true, true
-	} else if showcerts == ShowCertsInactive {
-		ac1, ac2 = false, false
-	} else if showcerts == ShowCertsAll {
-		ac1 = true
-		ac2 = false
-	} else {
-		panic("Invalid showcerts option passed to DatabaseReadUserExtended")
-	}
-	err = QueryFetchUserCerts.Select(&user.Certs, userid, ac1, ac2)
+	// Attach the certs
+	err = QueryFetchUserCerts.Select(&user.Certs, userid)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
