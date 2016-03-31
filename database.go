@@ -5,7 +5,6 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"log"
-	"strconv"
 )
 
 var (
@@ -13,7 +12,7 @@ var (
 	db *sqlx.DB
 
 	// CRUD for User
-	QueryCreateUser *sqlx.NamedStmt // Exec()
+	QueryCreateUser *sqlx.NamedStmt // QueryRow() (because we are using RETURNING)
 	QueryReadUser   *sqlx.Stmt      // Get()
 	QueryUpdateUser *sqlx.NamedStmt // Exec()
 	QueryDeleteUser *sqlx.Stmt      // Exec()
@@ -30,21 +29,21 @@ var (
 	QueryCertDeleteUsers  *sqlx.Stmt // Exec()
 
 	// SQL for User CRUD
-	SQLCreateUser = "INSERT INTO user(name,email) VALUES(:name,:email) RETURNING id;"
-	SQLReadUser   = "SELECT * from user WHERE id = $1;"
-	SQLUpdateUser = "UPDATE user SET name = :name AND email = :email WHERE id = :id;"
-	SQLDeleteUser = "BEGIN; DELETE FROM user WHERE id = $1; DELETE from certificate WHERE user = $1; COMMIT;"
+	SQLCreateUser = "INSERT INTO certstore_user(name,email) VALUES(:name, :email) RETURNING id"
+	SQLReadUser   = "SELECT * from certstore_user WHERE id = $1"
+	SQLUpdateUser = "UPDATE certstore_user SET name = :name, email = :email WHERE id = :id"
+	SQLDeleteUser = "DELETE FROM certstore_user WHERE id = $1"
 
 	// SQL for Cert CRUD
-	SQLCreateCert = "INSERT INTO certificate(id,user,active,cert,key) VALUES(:id,:user,:active,:cert,:key);"
-	SQLReadCert   = "SELECT * from certificate WHERE user = $1 AND id = $2;"
-	SQLUpdateCert = "UPDATE certificate SET active = :active AND cert = :cert AND key = :key WHERE user = :user AND id = :id;"
-	SQLDeleteCert = "DELETE FROM certificate WHERE user = $1 AND id = $2;"
+	SQLCreateCert = "INSERT INTO certstore_cert(id, userid, active, cert, key) VALUES(:id, :userid, :active, :cert, :key)"
+	SQLReadCert   = "SELECT * from certstore_cert WHERE userid = $1 AND id = $2"
+	SQLUpdateCert = "UPDATE certstore_cert SET active = :active AND cert = :cert AND key = :key WHERE userid = :userid AND id = :id"
+	SQLDeleteCert = "DELETE FROM certstore_cert WHERE userid = $1 AND id = $2"
 
 	// SQL for miscallaneous queries
-	SQLFetchUserCerts   = "SELECT * from certificate WHERE user = $1 AND (active = $2 OR active = $3)"
-	SQLCertUpdateActive = "UPDATE certificate SET active = $1 WHERE user = $2 AND id = $3;"
-	SQLCertDeleteUsers  = "DELETE from certificate WHERE user = $1"
+	SQLFetchUserCerts   = "SELECT * from certstore_cert WHERE userid = $1"
+	SQLCertUpdateActive = "UPDATE certstore_cert SET active = $1 WHERE userid = $2 AND id = $3"
+	SQLCertDeleteUsers  = "DELETE from certstore_cert WHERE userid = $1"
 )
 
 // Set-up the connection to the database on the global `db` connection.
@@ -116,7 +115,7 @@ func DatabasePrepareQueries() error {
 	}
 
 	// Other miscellaneous queries
-	QueryFetchUserCerts, err = db.Preparex(SQLUpdateCert)
+	QueryFetchUserCerts, err = db.Preparex(SQLFetchUserCerts)
 	if err != nil {
 		return err
 	}
@@ -142,21 +141,11 @@ func DatabaseCreateUser(user *User) error {
 	if err != nil {
 		return err
 	}
-	createUserStmt := tx.Stmtx(QueryCreateUser)
-	createCertStmt := tx.Stmtx(QueryCreateCert)
+	createUserStmt := tx.NamedStmt(QueryCreateUser)
+	createCertStmt := tx.NamedStmt(QueryCreateCert)
 
 	// Insert the user
-	res, err := createUserStmt.Exec(user)
-	if err != nil {
-		rollerr := tx.Rollback()
-		if rollerr != nil {
-			log.Println(rollerr)
-		}
-		return err
-	}
-
-	// Get the ID for the user
-	lastId, err := res.LastInsertId()
+	err = createUserStmt.Get(&user.Id, user)
 	if err != nil {
 		rollerr := tx.Rollback()
 		if rollerr != nil {
@@ -167,8 +156,9 @@ func DatabaseCreateUser(user *User) error {
 
 	// If the User contains certificates, insert them as well
 	if len(user.Certs) != 0 {
-		for cert := range user.Certs {
-			_, err := createCertStmt.Exec(cert)
+		for _, certData := range user.Certs {
+			certData.UserId = user.Id
+			_, err := createCertStmt.Exec(*certData)
 			if err != nil {
 				rollerr := tx.Rollback()
 				if rollerr != nil {
@@ -184,9 +174,6 @@ func DatabaseCreateUser(user *User) error {
 	if err != nil {
 		return err
 	}
-
-	// Update the User.Id
-	user.Id = strconv.Itoa(int(lastId))
 
 	return nil
 }
@@ -228,12 +215,45 @@ func DatabaseUpdateUser(user *User) error {
 // Given a user-id, delete a user. This will also delete the user's
 // certificates in a transaction safe manner.
 func DatabaseDeleteUser(userid string) error {
-	result, err := QueryDeleteUser.Exec(userid)
+	// Use a transaction so as to avoid foreign key errors
+	tx, err := db.Beginx()
 	if err != nil {
 		return err
 	}
-	if affected, err := result.RowsAffected(); affected == 0 || err != nil {
+	deleteUserStmt := tx.Stmtx(QueryDeleteUser)
+	deleteCertStmt := tx.Stmtx(QueryCertDeleteUsers)
+
+	// Delete the certs
+	_, err = deleteCertStmt.Exec(userid)
+	if err != nil {
+		rollerr := tx.Rollback()
+		if rollerr != nil {
+			log.Println(rollerr)
+		}
+		return err
+	}
+
+	// Delete the user
+	res, err := deleteUserStmt.Exec(userid)
+	if err != nil {
+		rollerr := tx.Rollback()
+		if rollerr != nil {
+			log.Println(rollerr)
+		}
+		return err
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+
+	// Check if we acutally deleted anything
+	if affected, err := res.RowsAffected(); affected == 0 || err != nil {
 		return ErrNotFound
 	}
+
+	// Sucessully deleted the user and their certificates
 	return nil
 }
