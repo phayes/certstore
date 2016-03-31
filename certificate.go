@@ -24,7 +24,7 @@ var (
 
 type Certificate struct {
 	Id     string // SHA256 hash (hex-encoded) of the certificate data (DER-encoded)
-	User   string
+	UserId string
 	Active bool
 	Cert   *x509.Certificate
 	Key    interface{} // Could be RSA or DSA Private Key
@@ -37,7 +37,7 @@ type Certificate struct {
 // 2. Retreival from the database and delivery to the client (no parsing overhead)
 type CertificateData struct {
 	Id     string `json:"id"`
-	User   string `json:"user"`
+	UserId string `json:"user"`
 	Active bool   `json:"active"`
 	Cert   string `json:"cert"`
 	Key    string `json:"key"`
@@ -46,7 +46,7 @@ type CertificateData struct {
 func NewCertificateFromData(certData *CertificateData) (*Certificate, error) {
 	cert := &Certificate{
 		Id:     certData.Id,
-		User:   certData.User,
+		UserId: certData.UserId,
 		Active: certData.Active,
 	}
 
@@ -167,7 +167,7 @@ func (cert *Certificate) Verify() error {
 func (cert *Certificate) GetData() *CertificateData {
 	certData := &CertificateData{
 		Id:     cert.Id,
-		User:   cert.User,
+		UserId: cert.UserId,
 		Active: cert.Active,
 	}
 
@@ -216,7 +216,7 @@ func (cert *Certificate) UnmarshalJSON(data []byte) error {
 
 	// Copy values
 	cert.Id = newCert.Id
-	cert.User = newCert.User
+	cert.UserId = newCert.UserId
 	cert.Active = newCert.Active
 	cert.Cert = newCert.Cert
 	cert.Key = newCert.Key
