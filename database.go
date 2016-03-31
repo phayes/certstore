@@ -20,7 +20,6 @@ var (
 	// CRUD for Cert
 	QueryCreateCert *sqlx.NamedStmt // Exec()
 	QueryReadCert   *sqlx.Stmt      // Get()
-	QueryUpdateCert *sqlx.NamedStmt // Exec()
 	QueryDeleteCert *sqlx.Stmt      // Exec()
 
 	// Other miscellaneous queries
@@ -37,7 +36,6 @@ var (
 	// SQL for Cert CRUD
 	SQLCreateCert = "INSERT INTO certstore_cert(id, userid, active, cert, key) VALUES(:id, :userid, :active, :cert, :key)"
 	SQLReadCert   = "SELECT * from certstore_cert WHERE userid = $1 AND id = $2"
-	SQLUpdateCert = "UPDATE certstore_cert SET active = :active AND cert = :cert AND key = :key WHERE userid = :userid AND id = :id"
 	SQLDeleteCert = "DELETE FROM certstore_cert WHERE userid = $1 AND id = $2"
 
 	// SQL for miscallaneous queries
@@ -105,10 +103,6 @@ func DatabasePrepareQueries() error {
 	if err != nil {
 		return err
 	}
-	QueryUpdateCert, err = db.PrepareNamed(SQLUpdateCert)
-	if err != nil {
-		return err
-	}
 	QueryDeleteCert, err = db.Preparex(SQLDeleteCert)
 	if err != nil {
 		return err
@@ -119,7 +113,7 @@ func DatabasePrepareQueries() error {
 	if err != nil {
 		return err
 	}
-	QueryDeleteCert, err = db.Preparex(SQLDeleteCert)
+	QueryCertUpdateActive, err = db.Preparex(SQLCertUpdateActive)
 	if err != nil {
 		return err
 	}
@@ -255,5 +249,56 @@ func DatabaseDeleteUser(userid string) error {
 	}
 
 	// Sucessully deleted the user and their certificates
+	return nil
+}
+
+// Given CertificateData, insert a row into the database
+func DatabaseCreateCert(cert *CertificateData) error {
+	// Insert the user
+	_, err := QueryCreateCert.Exec(cert)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Given a userID, get a User
+func DatabaseReadCert(userid, certid string) (*CertificateData, error) {
+	// Build the CertificateData struct
+	cert := new(CertificateData)
+	err := QueryReadCert.Get(cert, userid, certid)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		} else {
+			return nil, err
+		}
+	}
+
+	return cert, nil
+}
+
+// Update the certificate to mark it as active or inactive
+func DatabaseUpdateCertActive(userid, certid string, active bool) error {
+	result, err := QueryCertUpdateActive.Exec(userid, certid, active)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); affected == 0 || err != nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Given a user-id, and a cert-id delete a certificate.
+func DatabaseDeleteCert(userid, certid string) error {
+	result, err := QueryDeleteCert.Exec(userid, certid)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); affected == 0 || err != nil {
+		return ErrNotFound
+	}
 	return nil
 }

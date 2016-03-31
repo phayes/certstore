@@ -52,10 +52,13 @@ var (
 	OptMinimumECBits      = 160   // Minimum key length for ECC. In production this should be 224 or greater.
 
 	// Errors
-	ErrNotFound      = errors.New("Not Found")
-	ErrNoIDOnNewUser = errors.New("No user-id may be specified when POSTing a new user")
-	ErrBadPatchID    = errors.New("The user-id may not be updated in a PATCH request")
-	ErrBadPatchCerts = errors.New("The user certificates may not be updated in a PATCH request")
+	ErrNotFound          = errors.New("Not Found")
+	ErrNoIDOnNewUser     = errors.New("No user-id may be specified when POSTing a new user")
+	ErrBadUserPatchID    = errors.New("The user-id may not be updated in a PATCH request")
+	ErrBadUserPatchCerts = errors.New("The user certificates may not be updated in a PATCH request")
+	ErrBadCertPatchID    = errors.New("The certificate-id may not be updated in a PATCH request")
+	ErrBadCertPatchCert  = errors.New("The certificate data may not be updated in a PATCH request")
+	ErrBadCertPatchKey   = errors.New("The certificate key may not be updated in a PATCH request")
 )
 
 type HTTPResult struct {
@@ -74,15 +77,15 @@ func main() {
 
 	r := mux.NewRouter()
 
-	r.HandleFunc("/", IndexHandler)                                                     // output Plain Text
-	r.HandleFunc("/user", CreateUserHandler).Methods("POST")                            // output HTTPResult
-	r.HandleFunc("/user/{user-id}", ReadUserHandler).Methods("GET")                     // output User (users ?limit-certs=active|inactive)
-	r.HandleFunc("/user/{user-id}", UpdateUserHandler).Methods("PATCH")                 // output HTTPResult
-	r.HandleFunc("/user/{user-id}", DeleteUserHandler).Methods("DELETE")                // output HTTPResult
-	r.HandleFunc("/user/{user-id}/cert", CreateCertHandler).Methods("POST")             // output HTTPResult
-	r.HandleFunc("/user/{user-id}/cert/{cert-id}", ReadCertHandler).Methods("GET")      // output CertificateData
-	r.HandleFunc("/user/{user-id}/cert/{cert-id}", UpdateCertHandler).Methods("PATCH")  // output HTTPResult
-	r.HandleFunc("/user/{user-id}/cert/{cert-id}", DeleteCertHandler).Methods("DELETE") // output HTTPResult
+	r.HandleFunc("/", IndexHandler)
+	r.HandleFunc("/user", CreateUserHandler).Methods("POST")
+	r.HandleFunc("/user/{user-id}", ReadUserHandler).Methods("GET")
+	r.HandleFunc("/user/{user-id}", UpdateUserHandler).Methods("PATCH")
+	r.HandleFunc("/user/{user-id}", DeleteUserHandler).Methods("DELETE")
+	r.HandleFunc("/user/{user-id}/cert", CreateCertHandler).Methods("POST")
+	r.HandleFunc("/user/{user-id}/cert/{cert-id}", ReadCertHandler).Methods("GET")
+	r.HandleFunc("/user/{user-id}/cert/{cert-id}", UpdateCertHandler).Methods("PATCH")
+	r.HandleFunc("/user/{user-id}/cert/{cert-id}", DeleteCertHandler).Methods("DELETE")
 
 	http.Handle("/", r)
 	http.ListenAndServe(":8080", nil)
@@ -165,13 +168,8 @@ func ReadUserHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Send it to the client in JSON format
-	e := json.NewEncoder(w)
-	err = e.Encode(user)
-	if err != nil {
-		HandleError(w, r, err, 0)
-		return
-	}
+	// Send the result
+	SendResult(w, r, user)
 }
 
 func UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -193,11 +191,11 @@ func UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if userPatch.Id != "" {
-		HandleError(w, r, ErrBadPatchID, http.StatusBadRequest)
+		HandleError(w, r, ErrBadUserPatchID, http.StatusBadRequest)
 		return
 	}
 	if len(userPatch.Certs) != 0 {
-		HandleError(w, r, ErrBadPatchCerts, http.StatusBadRequest)
+		HandleError(w, r, ErrBadUserPatchCerts, http.StatusBadRequest)
 		return
 	}
 
@@ -259,7 +257,7 @@ func DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
 func CreateCertHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	userid, certid, err := GetUserCertID(r)
+	userid, err := GetUserID(r)
 	if err != nil {
 		HandleError(w, r, err, 0)
 		return
@@ -272,25 +270,115 @@ func CreateCertHandler(w http.ResponseWriter, r *http.Request) {
 		HandleError(w, r, err, 0)
 		return
 	}
+	if cert.UserId != userid {
+		HandleError(w, r, ErrInvalidUserId, 0)
+		return
+	}
 
+	certData := cert.GetData()
+
+	err = DatabaseCreateCert(certData)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Send the result
+	SendResult(w, r, certData)
 }
 
 func ReadCertHandler(w http.ResponseWriter, r *http.Request) {
-	//vars := mux.Vars(request)
-	//userid := vars["user-id"]
-	//certid := vars["cert-id"]
+	w.Header().Set("Content-Type", "application/json")
+
+	userid, certid, err := GetUserCertID(r)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	certData, err := DatabaseReadCert(userid, certid)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Send the result
+	SendResult(w, r, certData)
 }
 
 func UpdateCertHandler(w http.ResponseWriter, r *http.Request) {
-	//vars := mux.Vars(request)
-	//userid := vars["user-id"]
-	//certid := vars["cert-id"]
+	w.Header().Set("Content-Type", "application/json")
+
+	userid, certid, err := GetUserCertID(r)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Load the patch from the body
+	certPatch := new(CertificateData)
+	d := json.NewDecoder(r.Body)
+	err = d.Decode(certPatch)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+	if certPatch.Id != "" {
+		HandleError(w, r, ErrBadCertPatchID, http.StatusBadRequest)
+		return
+	}
+	if certPatch.UserId != "" {
+		HandleError(w, r, ErrBadUserPatchID, http.StatusBadRequest)
+		return
+	}
+	if certPatch.Cert != "" {
+		HandleError(w, r, ErrBadCertPatchCert, http.StatusBadRequest)
+		return
+	}
+	if certPatch.Key != "" {
+		HandleError(w, r, ErrBadCertPatchKey, http.StatusBadRequest)
+		return
+	}
+
+	// Update the certficate
+	err = DatabaseUpdateCertActive(userid, certid, certPatch.Active)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Load the patched certificate to send it back
+	// TODO: This is a bit racey
+	certData, err := DatabaseReadCert(userid, certid)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Send the result
+	SendResult(w, r, certData)
 }
 
 func DeleteCertHandler(w http.ResponseWriter, r *http.Request) {
-	//vars := mux.Vars(request)
-	//userid := vars["user-id"]
-	//certid := vars["cert-id"]
+	w.Header().Set("Content-Type", "application/json")
+
+	userid, certid, err := GetUserCertID(r)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	err = DatabaseDeleteCert(userid, certid)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	// Send the result
+	SendResult(w, r, struct {
+		Id     string `json:"id"`
+		UserId string `json:"user"`
+	}{userid, certid})
 }
 
 func GetUserID(r *http.Request) (string, error) {
