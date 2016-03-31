@@ -45,11 +45,13 @@ const (
 )
 
 var (
-	OptDatabaseConnection = "postgres://root@localhost/certstore"
+	// Options - change these
+	OptDatabaseConnection = "postgres://postgres@localhost/certstore?sslmode=disable"
 	OptVerifyCertificate  = false // Should the full certificate chain be fully verified and vetted?
 	OptMinimumRSABits     = 1024  // Minimum key length for RSA. In production this should be 2048 or greater.
 	OptMinimumECBits      = 160   // Minimum key length for ECC. In production this should be 224 or greater.
 
+	// Errors
 	ErrNotFound      = errors.New("Not Found")
 	ErrNoIDOnNewUser = errors.New("No user-id may be specified when POSTing a new user")
 	ErrBadPatchID    = errors.New("The user-id may not be updated in a PATCH request")
@@ -58,8 +60,7 @@ var (
 
 type HTTPResult struct {
 	Success bool        `json:"success"`
-	Error   error       `json:"error"`
-	Message string      `json:"error"`
+	Error   string      `json:"error"`
 	Result  interface{} `json:"result"`
 }
 
@@ -106,6 +107,18 @@ func CreateUserHandler(w http.ResponseWriter, r *http.Request) {
 		HandleError(w, r, ErrNoIDOnNewUser, http.StatusBadRequest)
 		return
 	}
+	if user.Name == "" {
+		HandleError(w, r, ErrInvalidUserName, http.StatusBadRequest)
+		return
+	}
+	if user.Email == "" {
+		HandleError(w, r, ErrInvalidUserEmail, http.StatusBadRequest)
+		return
+	}
+	err = user.ValidateNormalize()
+	if err != nil {
+		HandleError(w, r, err, 0)
+	}
 
 	// Store the user
 	err = DatabaseCreateUser(user)
@@ -136,6 +149,7 @@ func ReadUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit the certificates to only active or inactive certificates if specified
+	// TODO: Move this to a database query
 	limitcerts := r.URL.Query().Get("show-certs")
 	if limitcerts == LimitCertsActive {
 		for i, cert := range user.Certs {
@@ -170,36 +184,48 @@ func UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load the partial user from the body
-	user := new(User)
+	// Load the user PATCH from the body
+	userPatch := new(User)
 	d := json.NewDecoder(r.Body)
-	err = d.Decode(user)
+	err = d.Decode(userPatch)
 	if err != nil {
 		HandleError(w, r, err, http.StatusBadRequest)
 		return
 	}
-	if user.Id != "" {
+	if userPatch.Id != "" {
 		HandleError(w, r, ErrBadPatchID, http.StatusBadRequest)
 		return
 	}
-	if len(user.Certs) != 0 {
+	if len(userPatch.Certs) != 0 {
 		HandleError(w, r, ErrBadPatchCerts, http.StatusBadRequest)
 		return
 	}
 
-	// Save the user
-	user.Id = userid
-	err = DatabaseUpdateUser(user)
+	// Get the user
+	user, err := DatabaseReadUser(userid)
 	if err != nil {
 		HandleError(w, r, err, 0)
 		return
 	}
 
-	// Grab the user to send back in the result
-	// TODO: This is a bit racey, might need a fix
-	user, err = DatabaseReadUser(userid)
+	// Update the user with info from the PATCH
+	if userPatch.Name != "" {
+		user.Name = userPatch.Name
+	}
+	if userPatch.Email != "" {
+		user.Email = userPatch.Email
+	}
+
+	// Validate the updated user
+	err = user.ValidateNormalize()
 	if err != nil {
-		HandleError(w, r, err, http.StatusInternalServerError)
+		HandleError(w, r, err, 0)
+	}
+
+	// Save the user
+	err = DatabaseUpdateUser(user)
+	if err != nil {
+		HandleError(w, r, err, 0)
 		return
 	}
 
@@ -225,10 +251,27 @@ func DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send the result
-	SendResult(w, r, struct{ id string }{userid})
+	SendResult(w, r, struct {
+		Id string `json:"id"`
+	}{userid})
 }
 
 func CreateCertHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	userid, certid, err := GetUserCertID(r)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
+
+	cert := new(Certificate)
+	d := json.NewDecoder(r.Body)
+	err = d.Decode(cert)
+	if err != nil {
+		HandleError(w, r, err, 0)
+		return
+	}
 
 }
 
@@ -260,12 +303,28 @@ func GetUserID(r *http.Request) (string, error) {
 	return userid, nil
 }
 
+func GetUserCertID(r *http.Request) (string, string, error) {
+	userid, err := GetUserID(r)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Get the cert-id and verify the cert-id is 64 characters as a quick sanity check
+	vars := mux.Vars(r)
+	certid := vars["cert-id"]
+	if len(certid) != 64 {
+		return "", "", ErrNotFound
+	}
+
+	return userid, certid, nil
+}
+
 // Given an error, and an optional HTTP Status Code, deliver JSON to the client that describes the error
 // An httpCode of 0 may be given and an appropriate code will be determined from the error (defaults to 500)
 func HandleError(w http.ResponseWriter, r *http.Request, e error, httpCode int) {
 	res := HTTPResult{
 		Success: false,
-		Error:   e,
+		Error:   e.Error(),
 		Result:  nil,
 	}
 	jsonResult, err := json.Marshal(res)
@@ -285,7 +344,10 @@ func HandleError(w http.ResponseWriter, r *http.Request, e error, httpCode int) 
 			ErrInvalidCertificateId,
 			ErrInvalidPrivateKey,
 			ErrMissingPrivateKey,
-			ErrKeyTooSmall:
+			ErrKeyTooSmall,
+			ErrInvalidUserId,
+			ErrInvalidUserName,
+			ErrInvalidUserEmail:
 			httpCode = http.StatusBadRequest
 		default:
 			httpCode = http.StatusInternalServerError
@@ -299,13 +361,13 @@ func HandleError(w http.ResponseWriter, r *http.Request, e error, httpCode int) 
 func SendResult(w http.ResponseWriter, r *http.Request, result interface{}) {
 	res := HTTPResult{
 		Success: true,
-		Error:   nil,
 		Result:  result,
 	}
 	jsonResult, err := json.Marshal(res)
 	if err != nil {
 		HandleError(w, r, err, 0)
 	} else {
-		fmt.Fprint(w, jsonResult)
+		w.Write(jsonResult)
 	}
+
 }
